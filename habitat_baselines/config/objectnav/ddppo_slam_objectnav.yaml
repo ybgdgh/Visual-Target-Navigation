@@ -82,7 +82,7 @@ RL:
 
     map_output_size: 512
 
-    num_each_global_step: 16
+    num_each_global_step: 32
 
 
     

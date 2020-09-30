@@ -22,7 +22,7 @@ from habitat import logger
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat import Config, Env, RLEnv, Dataset
 
-
+from collections import Counter
 import quaternion
 import skimage.morphology
 import numpy as np
@@ -104,13 +104,11 @@ class NavRLEnv(habitat.RLEnv):
         se = list(set(semantic.ravel()))
         # print(se) # []
         for i in range(len(se)):
-            if self.scene.objects[se[i]] is not None and self.scene.objects[se[i]+1].category.name() in self.dataset.category_to_task_category_id:
+            if self.scene.objects[se[i]] is not None and self.scene.objects[se[i]].category.name() in self.dataset.category_to_task_category_id:
                 # print(self.scene.objects[se[i]].id) 
                 # print(self.scene.objects[se[i]].category.index()) 
                 # print(type(self.scene.objects[se[i]].category.index()) ) # int
-                semantic[
-                    semantic==se[i]
-                    ] = self.dataset.category_to_task_category_id[self.scene.objects[se[i]+1].category.name()]
+                semantic[semantic==se[i]] = self.dataset.category_to_task_category_id[self.scene.objects[se[i]].category.name()]
                 # print(self.scene.objects[se[i]+1].category.name())
             else :
                 semantic[
@@ -118,7 +116,7 @@ class NavRLEnv(habitat.RLEnv):
                     ] = 0
         semantic = semantic.astype(np.uint8)
         se = list(set(semantic.ravel()))
-        print(se) # []
+        # print("semantic: ", se) # []
 
         return semantic
 
@@ -163,7 +161,7 @@ class NavSLAMRLEnv(NavRLEnv):
 
         self.print_images = 1
 
-        self.figure, self.ax = plt.subplots(1,2, figsize=(6*16/9, 6),
+        self.figure, self.ax = plt.subplots(1,3, figsize=(6*16/9, 6),
                                                 facecolor="whitesmoke",
                                                 num="Thread {}".format(self.rank))
                                                 
@@ -227,8 +225,10 @@ class NavSLAMRLEnv(NavRLEnv):
         self.obs = rgb # For visualization
         depth = _preprocess_depth(obs['depth'])
         semantic = obs['semantic']
+        self.semantic = semantic
         self.object_ind = obs["objectgoal"]
-        # print(semantic)
+        self.object_name = list(self.dataset.category_to_task_category_id.keys())[list(self.dataset.category_to_task_category_id.values()).index(self.object_ind)]
+        # print(self.object_name)
 
         # se = list(set(semantic.ravel()))
         # print(se)
@@ -287,8 +287,8 @@ class NavSLAMRLEnv(NavRLEnv):
         map_sum = np.concatenate([input_map, self.semantic_map, input_explored_map], axis=2) 
         obs["map_sum"] = map_sum.astype(np.uint8)
         obs["curr_pose"] = np.array(
-                            [(self.curr_loc_gt[0]*100 / self.map_resolution),
-                            (self.curr_loc_gt[1]*100 / self.map_resolution)]).astype(np.float32)
+                            [(self.curr_loc_gt[1]*100 / self.map_resolution),
+                            (self.curr_loc_gt[0]*100 / self.map_resolution)]).astype(np.float32)
         return obs
 
 
@@ -413,7 +413,8 @@ class NavSLAMRLEnv(NavRLEnv):
 
         depth = _preprocess_depth(obs['depth'])
         semantic = obs['semantic']
-        self.object_ind = obs["objectgoal"]
+        self.semantic = semantic
+        # self.object_ind = obs["objectgoal"]
         # print("object_ind: ", self.object_ind)
         # se = list(set(semantic.ravel()))
         # print(se)
@@ -436,6 +437,12 @@ class NavSLAMRLEnv(NavRLEnv):
         # Update ground_truth map and explored area
         fp_proj, self.map, fp_explored, self.explored_map, self.semantic_map = \
                 self.mapper.update_map(depth, semantic, mapper_gt_pose)
+
+        # print("semantic count: ", Counter(semantic.ravel()))
+        # for i in range(self.semantic_map.shape[2]):
+        #     se_map = list(set(np.array(self.semantic_map[:,:,i].ravel())))
+        #     if len(se_map) > 1:
+        #         print("self.semantic_map: ", i, Counter(np.array(self.semantic_map[:,:,i].ravel()))) # []
 
         # print("self._previous_action", self._previous_action)
         if self._previous_action["action"] == 1:
@@ -482,8 +489,8 @@ class NavSLAMRLEnv(NavRLEnv):
         # print("semantic: ", type(map_sum[0]))
         obs["map_sum"] = map_sum.astype(np.uint8)
         obs["curr_pose"] = np.array(
-                            [(self.curr_loc_gt[0]*100.0 / self.map_resolution),
-                            (self.curr_loc_gt[1]*100.0 / self.map_resolution)]).astype(np.float32)
+                            [(self.curr_loc_gt[1]*100.0 / self.map_resolution),
+                            (self.curr_loc_gt[0]*100.0 / self.map_resolution)]).astype(np.float32)
 
         return obs, rew, done, info
 
@@ -532,8 +539,9 @@ class NavSLAMRLEnv(NavRLEnv):
 
         # semantic map goal
         # goal_list=[]
+        Find_flag = False
         object_map = self.semantic_map[:,:,self.object_ind[0]-1]
-        if len(object_map[object_map!=0]) > 0:
+        if len(object_map[object_map!=0]) > 5:
             print("map_objectid: ", self.object_ind[0],
                 "num: ", len(object_map[object_map!=0]))
             goal_list = np.array(np.array(object_map.nonzero()).T)
@@ -547,6 +555,7 @@ class NavSLAMRLEnv(NavRLEnv):
 
             global_goal = torch.from_numpy(goal_list[index])
 
+            Find_flag = True
             print("global_goal: ", global_goal)
             
 
@@ -557,15 +566,17 @@ class NavSLAMRLEnv(NavRLEnv):
         # print("goal: ", type(goal))
 
         # Get short-term goal
-        stg = self._get_stg(self.map, self.explored_map, start_gt, np.copy(goal), planning_window)
+        stg, replan = self._get_stg(self.map, self.explored_map, start_gt, np.copy(goal), planning_window)
 
-        print("stg: ", stg)
+        # print("stg: ", stg)
 
         # Find GT action
         gt_action = self._get_gt_action(1 - self.explored_map, 
                                         start_gt,
                                         [int(stg[0]), int(stg[1])],
-                                        planning_window, start_o_gt)
+                                        np.copy(goal),
+                                        planning_window, start_o_gt, 
+                                        Find_flag, replan)
         
         
         dump_dir = "habitat_baselines/dump"
@@ -583,12 +594,12 @@ class NavSLAMRLEnv(NavRLEnv):
                         self.map*self.explored_map,
                         self.semantic_map)
         vis_grid = np.flipud(vis_grid)
-        vu.visualize(self.figure, self.ax, self.obs, vis_grid[:,:,::-1],
+        vu.visualize(self.figure, self.ax, self.obs, self.semantic, vis_grid[:,:,::-1],
                     (start_x_gt, start_y_gt, start_o_gt),
                     (start_x_gt, start_y_gt, start_o_gt),
                     dump_dir, self.rank, self.episode_no,
                     self.timestep, self.visualize,
-                    self.print_images, self.vis_type)
+                    self.print_images, self.object_name, gt_action)
 
         return gt_action
 
@@ -670,10 +681,10 @@ class NavSLAMRLEnv(NavRLEnv):
         else:
             stg_x, stg_y = stg_x + x1 - 1, stg_y + y1 - 1
 
-        return (stg_x, stg_y)
+        return (stg_x, stg_y), replan
 
 
-    def _get_gt_action(self, grid, start, goal, planning_window, start_o):
+    def _get_gt_action(self, grid, start, goal, g_goal, planning_window, start_o, Find_flag, replan):
 
         [gx1, gx2, gy1, gy2] = planning_window
 
@@ -733,8 +744,12 @@ class NavSLAMRLEnv(NavRLEnv):
         relative_angle = (angle_agent - angle_st_goal)%360.0
         if relative_angle > 180:
             relative_angle -= 360
-        # print("distance: ", dist)
-        if dist < 3.0:
+
+        g_dist = pu.get_l2_distance(g_goal[0], start[0], g_goal[1], start[1])
+
+        if Find_flag:
+            print("distance: ", g_dist)
+        if (g_dist < 6.0 and Find_flag) or replan:
             gt_action = 0
 
         elif relative_angle > 15.:

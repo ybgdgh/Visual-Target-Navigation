@@ -11,10 +11,11 @@ import matplotlib.pyplot as plt
 
 import seaborn as sns
 import skimage
+from PIL import Image
+from habitat_sim.utils.common import d3_40_colors_rgb
 
-
-def visualize(fig, ax, img, grid, pos, gt_pos, dump_dir, rank, ep_no, t,
-              visualize, print_images, vis_style):
+def visualize(fig, ax, img, semantic_obs, grid, pos, gt_pos, dump_dir, rank, ep_no, t,
+              visualize, print_images, object_name, gt_action):
     for i in range(2):
         ax[i].clear()
         ax[i].set_yticks([])
@@ -27,15 +28,20 @@ def visualize(fig, ax, img, grid, pos, gt_pos, dump_dir, rank, ep_no, t,
                     fontname='Helvetica',
                     fontsize=20)
 
-    if vis_style == 1:
-        title = "Predicted Map and Pose"
-    else:
-        title = "Ground-Truth Map and Pose"
+
+    title = "Find " + object_name + ", Action: " +str(gt_action)
 
     ax[1].imshow(grid)
     ax[1].set_title(title, family='sans-serif',
                     fontname='Helvetica',
                     fontsize=20)
+
+    semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
+    semantic_img.putpalette(d3_40_colors_rgb.flatten())
+    semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
+    semantic_img = semantic_img.convert("RGB")
+    semantic_img = np.array(semantic_img)
+    ax[2].imshow(semantic_img)
     # print("================================vis: ", img.shape, "================================", grid.shape) #480 480 3
     # Draw GT agent pose
     agent_size = 8

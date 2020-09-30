@@ -20,7 +20,7 @@ from argparse import Namespace
 import numpy as np
 
 import habitat_baselines.common.map_utils.rotation_utils as ru
-
+from collections import Counter
 
 def get_camera_matrix(width, height, fov):
     """Returns a camera matrix from image size and fov."""
@@ -172,32 +172,35 @@ def bin_semantic_points(XYZ_cms, semantic, map_size, semantic_map_len, xy_resolu
     # print("XYZ_cms: ",XYZ_cms)
     # print("XYZ_cms: ",XYZ_cms.shape) #1*128*128*3
     # print("z_bins: ",z_bins) 
-
-
+    # se = list(set(semantic.ravel()))
+    # print("bin_semantic_points: ", se) # []
     # print("XYZ_cm:", XYZ_cm.shape) # 128*128*3
     isnotnan = np.logical_not(np.isnan(XYZ_cms[:, :, 0]))
     X_bin = np.round(XYZ_cms[:, :, 0] / xy_resolution).astype(np.int32)
     Y_bin = np.round(XYZ_cms[:, :, 1] / xy_resolution).astype(np.int32)
     Z_bin = semantic.astype(np.int32)
 
+    # print("X_bin S count: ", Counter(X_bin.ravel()))
+    # print("Y_bin S count: ", Counter(Y_bin.ravel()))
+    # print("Z_bin S count: ", Counter(Z_bin.ravel()))
     # print("Z_bin: {}".format(X_bin))
     # print("X_bin: {}".format(X_bin.shape)) #128*128
     # print("Z_bin: {}".format(Z_bin.shape)) #128*128
 
     isvalid = np.array([X_bin >= 0, X_bin < map_size, Y_bin >= 0, Y_bin < map_size,
-                        Z_bin > 0, Z_bin < semantic_map_len, isnotnan])
+                        Z_bin > 0, Z_bin <= semantic_map_len, isnotnan])
     isvalid = np.all(isvalid, axis=0)
 
-    # print("isvalid: ", isvalid)
+    # print("isvalid: ", Counter(isvalid.ravel()))
     # print("isvalid: ", isvalid.shape) #128*128
 
-    ind = (Y_bin * map_size + X_bin) * semantic_map_len + Z_bin 
+    ind = (Y_bin * map_size + X_bin) * semantic_map_len + Z_bin-1 
     ind[np.logical_not(isvalid)] = 0
-    # print("ind: ", ind)
+    # print("ind: ", Counter(ind.ravel()))
     # print("ind: ", ind.shape) # 128*128
     count = np.bincount(ind.ravel(), isvalid.ravel().astype(np.int32),
                         minlength=map_size * map_size * semantic_map_len)
-    # print("counts: ", count.shape) # 11980800
+    # print("counts: ", count.shape) # 4838400
 
     counts = np.reshape(count, [map_size, map_size, semantic_map_len])
     # print("counts: ", counts.shape) # 480*480*semantic_map_len
