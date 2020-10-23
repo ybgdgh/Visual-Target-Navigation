@@ -52,6 +52,8 @@ class DDPPOSLAM(DDPPO):
                     actions_batch,
                 )
 
+                # print("old_action_log_probs_batch: ", old_action_log_probs_batch)
+                # print("action_log_probs: ", action_log_probs)
 
                 ratio = torch.exp(
                     action_log_probs - old_action_log_probs_batch
@@ -63,6 +65,10 @@ class DDPPOSLAM(DDPPO):
                     )
                     * adv_targ
                 )
+                
+                # print("adv_targ: ", adv_targ)
+                # print("surr1: ", surr1)
+                # print("surr2: ", surr2)
                 action_loss = -torch.min(surr1, surr2).mean()
 
                 if self.use_clipped_value_loss:
@@ -77,6 +83,7 @@ class DDPPOSLAM(DDPPO):
                         0.5
                         * torch.max(value_losses, value_losses_clipped).mean()
                     )
+                    # print("value_losses_clipped: ", value_losses_clipped)
                 else:
                     value_loss = 0.5 * (return_batch - values).pow(2).mean()
 
@@ -86,6 +93,15 @@ class DDPPOSLAM(DDPPO):
                     + action_loss
                     - dist_entropy * self.entropy_coef
                 )
+
+                # print("values: ", values)
+                # print("value_preds_batch: ", value_preds_batch)
+                # if return_batch.device == "cuda:0":
+                # print("return_batch: ", return_batch)
+
+                # print("value_loss: ", value_loss)
+                # print("action_loss: ", action_loss)
+                # print("total_loss: ", total_loss)
 
                 self.before_backward(total_loss)
                 total_loss.backward()

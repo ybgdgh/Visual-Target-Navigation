@@ -21,7 +21,7 @@ class MapBuilder(object):
         agent_max_z = params['agent_max_z']
         self.z_bins = [agent_min_z, agent_max_z]
         self.du_scale = params['du_scale']
-        self.visualize = params['visualize']
+        self.object_len = params['object_len']
         self.obs_threshold = params['obs_threshold']
 
         self.map = np.zeros((self.map_size_cm // self.resolution,
@@ -78,7 +78,7 @@ class MapBuilder(object):
             geocentric_pc, # 128*128*3
             S, #128*128
             self.map.shape[0], 
-            self.semantic_map_len,
+            self.object_len,
             self.resolution
         )
 
@@ -101,7 +101,7 @@ class MapBuilder(object):
         explored_gt = self.map.sum(2)
         explored_gt[explored_gt > 1] = 1.0
 
-        return agent_view_cropped, map_gt, agent_view_explored, explored_gt, map_se
+        return map_gt, explored_gt, map_se
 
     def get_st_pose(self, current_loc):
         loc = [- (current_loc[0] / self.resolution
@@ -113,9 +113,8 @@ class MapBuilder(object):
                90 - np.rad2deg(current_loc[2])]
         return loc
 
-    def reset_map(self, map_size, object_len):
+    def reset_map(self, map_size):
         self.map_size_cm = map_size
-        self.semantic_map_len = object_len
 
         self.map = np.zeros((self.map_size_cm // self.resolution,
                              self.map_size_cm // self.resolution,
@@ -123,7 +122,13 @@ class MapBuilder(object):
 
         self.semantic_map = np.zeros((self.map.shape[0], 
                                     self.map.shape[1],     
-                                    self.semantic_map_len), dtype=np.float32)
+                                    self.object_len), dtype=np.float32)
 
     def get_map(self):
         return self.map
+
+    def reset_boundaries(self, local_map, semantic_map):
+
+        self.map = local_map
+        self.semantic_map = semantic_map
+

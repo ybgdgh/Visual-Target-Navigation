@@ -77,14 +77,16 @@ class NavRLEnv(habitat.RLEnv):
         ]
 
         self.scene = self.habitat_env.sim.semantic_annotations()
-        self.object_len = len(self.scene.objects)
 
-        for obj in self.scene.objects:
-            if obj is not None:
-                print(
-                    f"Object id:{obj.id}, category:{obj.category.name()}, index:{obj.category.index()}"
-                    f" center:{obj.aabb.center}, dims:{obj.aabb.sizes}"
-                )
+        # print("************************************* current_episodes:", (self._env.current_episode.scene_id))
+        # print("************************************* current_episodes:", (self._env.current_episode.episode_id))
+
+        # for obj in self.scene.objects:
+        #     if obj is not None:
+        #         print(
+        #             f"Object id:{obj.id}, category:{obj.category.name()}, index:{obj.category.index()}"
+        #             f" center:{obj.aabb.center}, dims:{obj.aabb.sizes}"
+        #         )
 
         if "semantic" in observations:
             observations["semantic"] = self._preprocess_semantic(observations["semantic"])
@@ -156,12 +158,13 @@ class NavRLEnv(habitat.RLEnv):
 @baseline_registry.register_env(name="NavSLAMRLEnv")
 class NavSLAMRLEnv(NavRLEnv):
     def __init__(self, config: Config, dataset: Optional[Dataset] = None):
+        self.dataset = dataset
 
         self.rank = config.NUM_PROCESSES
 
         self.print_images = 1
 
-        self.figure, self.ax = plt.subplots(1,3, figsize=(6*16/9, 6),
+        self.figure, self.ax = plt.subplots(1,2, figsize=(6*16/9, 6),
                                                 facecolor="whitesmoke",
                                                 num="Thread {}".format(self.rank))
                                                 
@@ -184,14 +187,22 @@ class NavSLAMRLEnv(NavRLEnv):
 
         self.collision_threshold = config.RL.SLAMDDPPO.collision_threshold
         self.vis_type = config.RL.SLAMDDPPO.vis_type # '1: Show predicted map, 2: Show GT map'
-
-        # self.res = transforms.Compose([transforms.ToPILImage(),
-        #             transforms.Resize((self.frame_height, self.frame_width),
-        #                               interpolation = Image.NEAREST)])
+        self.global_downscaling = config.RL.SLAMDDPPO.global_downscaling
 
         # 创建地图
+        self.object_len = len(dataset.category_to_task_category_id)
+
         self.mapper = self.build_mapper()
-        self.full_map_size = self.map_size_cm//self.map_resolution
+        self.local_map_size = self.map_size_cm//self.map_resolution
+        self.full_map_size = self.local_map_size * self.global_downscaling
+
+        self.full_map = np.zeros((self.full_map_size,
+                             self.full_map_size,
+                             3), dtype=np.float32)
+
+        self.full_semantic_map = np.zeros((self.full_map.shape[0], 
+                                    self.full_map.shape[1],     
+                                    self.object_len), dtype=np.float32)
 
         super().__init__(config, dataset)
 
@@ -212,15 +223,7 @@ class NavSLAMRLEnv(NavRLEnv):
         # Get Ground Truth Map
         self.explorable_map = None
         obs = super().reset()
-        # t1 = time.clock()
-        # deta_t = str(t1 - start_time)
-        # print("reset time: ", deta_t)
 
-        # while self.explorable_map is None:
-        #     self.explorable_map = self._get_gt_map(self.full_map_size)
-
-            # t2 = time.clock()
-            # print("depth time: ", t2 - t1)
         rgb = obs['rgb'].astype(np.uint8)
         self.obs = rgb # For visualization
         depth = _preprocess_depth(obs['depth'])
@@ -228,55 +231,66 @@ class NavSLAMRLEnv(NavRLEnv):
         self.semantic = semantic
         self.object_ind = obs["objectgoal"]
         self.object_name = list(self.dataset.category_to_task_category_id.keys())[list(self.dataset.category_to_task_category_id.values()).index(self.object_ind)]
+        
         # print(self.object_name)
 
-        # se = list(set(semantic.ravel()))
-        # print(se)
+        # Initialize global map and pose
+        self.full_map = np.zeros((self.full_map_size,
+                             self.full_map_size,
+                             3), dtype=np.float32)
 
-        # scene = self.habitat_env.sim.semantic_annotations()
-        # self.object_len = len(scene.objects)
-        # print("object number: ", self.object_len)
-        
+        self.full_semantic_map = np.zeros((self.full_map.shape[0], 
+                                    self.full_map.shape[1],     
+                                    self.object_len), dtype=np.float32)
 
-        # Initialize map and pose
-        self.mapper.reset_map(self.map_size_cm, 21)
-        self.curr_loc = [self.map_size_cm/100.0/2.0,
-                         self.map_size_cm/100.0/2.0, 0.]
-        self.curr_loc_gt = self.curr_loc
-        self.last_loc_gt = self.curr_loc_gt
-        self.last_loc = self.curr_loc
+        self.curr_full_pose = [self.map_size_cm/100.0/2.0*self.global_downscaling,
+                         self.map_size_cm/100.0/2.0*self.global_downscaling, 0.]
+        self.last_full = self.curr_full_pose
         self.last_sim_location = self.get_sim_location()
 
+        # Initialize local map and pose
+        self.mapper.reset_map(self.map_size_cm)
+        self.local_map = np.zeros((self.local_map_size,
+                             self.local_map_size,
+                             3), dtype=np.float32)
 
+        self.local_semantic_map = np.zeros((self.local_map.shape[0], 
+                                    self.local_map.shape[1],     
+                                    self.object_len), dtype=np.float32)
+        self.curr_loc_pose = [self.map_size_cm/100.0/2.0,
+                               self.map_size_cm/100.0/2.0, 0.]
+        self.last_loc_gt = self.curr_loc_pose
+
+        # Initialize slide windows map boundaries and origin
+        self.local_origin = [int(self.curr_full_pose[1] * 100.0 / self.map_resolution),
+                            int(self.curr_full_pose[0] * 100.0 / self.map_resolution),
+                            self.curr_full_pose[2]]
+
+        self.lmb = self.get_local_map_boundaries((self.local_origin[0], self.local_origin[1]),
+                                            (self.local_map_size, self.local_map_size),
+                                            (self.full_map_size,self.full_map_size))
         # Convert pose to cm and degrees for mapper
-        mapper_gt_pose = (self.curr_loc_gt[0]*100.0,
-                          self.curr_loc_gt[1]*100.0,
-                          np.deg2rad(self.curr_loc_gt[2]))
+        mapper_local_pose = (self.curr_loc_pose[0]*100.0,
+                          self.curr_loc_pose[1]*100.0,
+                          np.deg2rad(self.curr_loc_pose[2]))
 
         # Update ground_truth map and explored area
-        fp_proj, self.map, fp_explored, self.explored_map, self.semantic_map = \
-            self.mapper.update_map(depth, semantic, mapper_gt_pose)
+        self.map, self.explored_map, self.semantic_map = \
+            self.mapper.update_map(depth, semantic, mapper_local_pose)
         
         # Initialize variables
         self.scene_name = self.habitat_env.sim.config.SCENE
-        self.visited = np.zeros(self.map.shape)
-        self.visited_vis = np.zeros(self.map.shape)
+        self.visited_full = np.zeros((self.full_map_size,
+                             self.full_map_size), dtype=np.float32)
         self.visited_gt = np.zeros(self.map.shape)
+        self.collison_full_map = np.zeros((self.full_map_size,
+                             self.full_map_size), dtype=np.float32)
         self.collison_map = np.zeros(self.map.shape)
         self.col_width = 1
 
-        # Set info
-        self.info = {
-            'time': self.timestep,
-            'fp_proj': fp_proj,
-            'fp_explored': fp_explored,
-            'sensor_pose': [0., 0., 0.],
-            'pose_err': [0., 0., 0.],
-        }
-
         self.save_position()
 
-        # obs["semantic_map"] = self.semantic_map # 480*480*21
+        # obs["semantic_map"] = self.semantic_map.shape # 480*480*21
         # obs["collusion_map"] = self.map # 480*480
         # obs["explored_map"] = self.explored_map
         map_copy = self.map.copy()
@@ -287,117 +301,15 @@ class NavSLAMRLEnv(NavRLEnv):
         map_sum = np.concatenate([input_map, self.semantic_map, input_explored_map], axis=2) 
         obs["map_sum"] = map_sum.astype(np.uint8)
         obs["curr_pose"] = np.array(
-                            [(self.curr_loc_gt[1]*100 / self.map_resolution),
-                            (self.curr_loc_gt[0]*100 / self.map_resolution)]).astype(np.float32)
+                            [(self.curr_loc_pose[1]*100 / self.map_resolution),
+                            (self.curr_loc_pose[0]*100 / self.map_resolution)]).astype(np.float32)
         return obs
-
-
-    def build_mapper(self):
-        params = {}
-        params['frame_width'] = self.env_frame_width
-        params['frame_height'] = self.env_frame_height
-        params['fov'] =  self.hfov
-        params['resolution'] = self.map_resolution
-        params['map_size_cm'] = self.map_size_cm
-        params['agent_min_z'] = self.agent_min_z
-        params['agent_max_z'] = self.agent_max_z
-        params['agent_height'] = self.camera_height * 100
-        params['agent_view_angle'] = self.agent_view_angle
-        params['du_scale'] = self.du_scale
-        params['vision_range'] = self.vision_range
-        params['visualize'] = self.visualize
-        params['obs_threshold'] = self.obs_threshold
-        self.selem = skimage.morphology.disk(5 /
-                                             5)
-        mapper = MapBuilder(params)
-        return mapper
-
-
-
-    def _get_gt_map(self, full_map_size):
-        self.scene_name = self.habitat_env.sim.config.SCENE
-        logger.error('Computing map for %s', self.scene_name)
-
-        # Get map in habitat simulator coordinates
-        self.map_obj = HabitatMaps(self.habitat_env)
-        if self.map_obj.size[0] < 1 or self.map_obj.size[1] < 1:
-            logger.error("Invalid map: {}/{}".format(
-                            self.scene_name, self.episode_no))
-            return None
-
-        agent_y = self._env.sim.get_agent_state().position.tolist()[1]*100.
-        sim_map = self.map_obj.get_map(agent_y, -50., 50.0)
-
-        sim_map[sim_map > 0] = 1.
-
-        # Transform the map to align with the agent
-        min_x, min_y = self.map_obj.origin/100.0
-        x, y, o = self.get_sim_location()
-        x, y = -x - min_x, -y - min_y
-        range_x, range_y = self.map_obj.max/100. - self.map_obj.origin/100.
-
-        map_size = sim_map.shape
-        scale = 2.
-        grid_size = int(scale*max(map_size))
-        grid_map = np.zeros((grid_size, grid_size))
-
-        grid_map[(grid_size - map_size[0])//2:
-                 (grid_size - map_size[0])//2 + map_size[0],
-                 (grid_size - map_size[1])//2:
-                 (grid_size - map_size[1])//2 + map_size[1]] = sim_map
-
-        if map_size[0] > map_size[1]:
-            st = torch.tensor([[
-                    (x - range_x/2.) * 2. / (range_x * scale) \
-                             * map_size[1] * 1. / map_size[0],
-                    (y - range_y/2.) * 2. / (range_y * scale),
-                    180.0 + np.rad2deg(o)
-                ]])
-
-        else:
-            st = torch.tensor([[
-                    (x - range_x/2.) * 2. / (range_x * scale),
-                    (y - range_y/2.) * 2. / (range_y * scale) \
-                            * map_size[0] * 1. / map_size[1],
-                    180.0 + np.rad2deg(o)
-                ]])
-
-        rot_mat, trans_mat = get_grid(st, (1, 1,
-            grid_size, grid_size), torch.device("cpu"))
-
-        grid_map = torch.from_numpy(grid_map).float()
-        grid_map = grid_map.unsqueeze(0).unsqueeze(0)
-        translated = F.grid_sample(grid_map, trans_mat)
-        rotated = F.grid_sample(translated, rot_mat)
-
-        episode_map = torch.zeros((full_map_size, full_map_size)).float()
-        if full_map_size > grid_size:
-            episode_map[(full_map_size - grid_size)//2:
-                        (full_map_size - grid_size)//2 + grid_size,
-                        (full_map_size - grid_size)//2:
-                        (full_map_size - grid_size)//2 + grid_size] = \
-                                rotated[0,0]
-        else:
-            episode_map = rotated[0,0,
-                              (grid_size - full_map_size)//2:
-                              (grid_size - full_map_size)//2 + full_map_size,
-                              (grid_size - full_map_size)//2:
-                              (grid_size - full_map_size)//2 + full_map_size]
-
-
-
-        episode_map = episode_map.numpy()
-        episode_map[episode_map > 0] = 1.
-
-        return episode_map
-
 
     def step(self, *args, **kwargs):
 
         self.timestep += 1
 
-        self.last_loc = np.copy(self.curr_loc)
-        self.last_loc_gt = np.copy(self.curr_loc_gt)
+        self.last_loc_gt = np.copy(self.curr_loc_pose)
 
         self._previous_action = kwargs["action"]
 
@@ -425,18 +337,20 @@ class NavSLAMRLEnv(NavRLEnv):
         # Get base sensor and ground-truth pose
         dx_gt, dy_gt, do_gt = self.get_gt_pose_change()
 
-        self.curr_loc_gt = pu.get_new_pose(self.curr_loc_gt,
+        self.curr_loc_pose = pu.get_new_pose(self.curr_loc_pose,
+                               (dx_gt, dy_gt, do_gt))
+        self.curr_full_pose = pu.get_new_pose(self.curr_full_pose,
                                (dx_gt, dy_gt, do_gt))
 
 
         # Convert pose to cm and degrees for mapper
-        mapper_gt_pose = (self.curr_loc_gt[0]*100.0,
-                          self.curr_loc_gt[1]*100.0,
-                          np.deg2rad(self.curr_loc_gt[2]))
+        mapper_local_pose = (self.curr_loc_pose[0]*100.0,
+                          self.curr_loc_pose[1]*100.0,
+                          np.deg2rad(self.curr_loc_pose[2]))
 
         # Update ground_truth map and explored area
-        fp_proj, self.map, fp_explored, self.explored_map, self.semantic_map = \
-                self.mapper.update_map(depth, semantic, mapper_gt_pose)
+        self.map, self.explored_map, self.semantic_map = \
+                self.mapper.update_map(depth, semantic, mapper_local_pose)
 
         # print("semantic count: ", Counter(semantic.ravel()))
         # for i in range(self.semantic_map.shape[2]):
@@ -447,7 +361,7 @@ class NavSLAMRLEnv(NavRLEnv):
         # print("self._previous_action", self._previous_action)
         if self._previous_action["action"] == 1:
             x1, y1, t1 = self.last_loc_gt
-            x2, y2, t2 = self.curr_loc_gt
+            x2, y2, t2 = self.curr_loc_pose
             if abs(x1 - x2)< 0.05 and abs(y1 - y2) < 0.05:
                 self.col_width += 2
                 self.col_width = min(self.col_width, 9)
@@ -474,9 +388,7 @@ class NavSLAMRLEnv(NavRLEnv):
                         # print("collision map: ", r, c)
 
         # Set info
-        self.info['time'] = self.timestep
-        self.info['fp_proj'] = fp_proj
-        self.info['fp_explored']= fp_explored
+        # info['time'] = self.timestep
 
         self.save_position()
 
@@ -485,14 +397,124 @@ class NavSLAMRLEnv(NavRLEnv):
         input_map = map_copy[:,:,np.newaxis]
         input_explored_map = explored_map_copy[:,:,np.newaxis]
         # print("semantic: ", self.semantic_map.shape, self.map.shape)
-        map_sum = np.concatenate([input_map, input_explored_map, self.semantic_map], axis=2) 
+        map_sum = np.concatenate([input_map, self.semantic_map, input_explored_map], axis=2) 
         # print("semantic: ", type(map_sum[0]))
         obs["map_sum"] = map_sum.astype(np.uint8)
         obs["curr_pose"] = np.array(
-                            [(self.curr_loc_gt[1]*100.0 / self.map_resolution),
-                            (self.curr_loc_gt[0]*100.0 / self.map_resolution)]).astype(np.float32)
+                            [(self.curr_loc_pose[1]*100.0 / self.map_resolution),
+                            (self.curr_loc_pose[0]*100.0 / self.map_resolution)]).astype(np.float32)
 
         return obs, rew, done, info
+
+
+    def update_full_map(self):
+        # update global map
+        # print("lmb: ", self.lmb)
+        self.full_map[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3],:] = \
+            np.copy(self.mapper.map)
+
+        self.full_semantic_map[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3],:] = \
+            np.copy(self.mapper.semantic_map)
+
+        # print(self.visited_full[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3]].shape)
+        # print(self.visited_gt.shape)
+        self.visited_full[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3]] = \
+            np.copy(self.visited_gt)
+
+        self.collison_full_map[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3]] = \
+            np.copy(self.collison_map)
+
+        # update boundaries
+        self.local_origin = [int(self.curr_full_pose[1] * 100.0 / self.map_resolution),
+                            int(self.curr_full_pose[0] * 100.0 / self.map_resolution),
+                            self.curr_full_pose[2]]
+
+        self.lmb = self.get_local_map_boundaries((self.local_origin[0], self.local_origin[1]),
+                                            (self.local_map_size, self.local_map_size),
+                                            (self.full_map_size,self.full_map_size))
+        # print("lmb later: ", self.lmb)
+        
+        self.local_map = \
+            self.full_map[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3],:].copy()
+        self.local_semantic_map = \
+            self.full_semantic_map[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3],:].copy()
+        self.visited_gt = \
+            self.visited_full[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3]].copy()
+        self.collison_map = \
+            self.collison_full_map[self.lmb[0]:self.lmb[1], self.lmb[2]:self.lmb[3]].copy()
+
+        # print(self.local_map.shape)
+        # print(self.local_semantic_map.shape)
+        self.mapper.reset_boundaries(self.local_map, self.local_semantic_map)
+
+        self.map = self.local_map[:,:,1]
+        self.map[self.map >= 0.5] = 1.0
+        self.map[self.map < 0.5] = 0.0
+
+        self.semantic_map = self.local_semantic_map
+        self.semantic_map[self.semantic_map >=0.5] = 1.0
+        self.semantic_map[self.semantic_map < 0.5] = 0.0
+
+        self.explored_map = self.local_map.sum(2)
+        self.explored_map[self.explored_map>1] = 1.0
+
+
+
+        # update local pose
+        # print("local_origin: ", self.local_origin)
+        # print("lmb: ", self.lmb)
+        self.curr_loc_pose = [
+            (self.local_origin[1] - (self.lmb[2]+self.lmb[3])/2)*self.map_resolution/100.0 + self.map_size_cm/100.0/2.0, 
+            (self.local_origin[0] - (self.lmb[0]+self.lmb[1])/2)*self.map_resolution/100.0 + self.map_size_cm/100.0/2.0,
+            self.local_origin[2]]
+        self.last_loc_gt = self.curr_loc_pose
+        # print("loc: ", self.curr_loc_pose)
+
+        return
+
+    def get_local_map_boundaries(self, agent_loc, local_sizes, full_sizes):
+        loc_r, loc_c = agent_loc
+        local_w, local_h = local_sizes
+        full_w, full_h = full_sizes
+
+        if self.global_downscaling > 1:
+            gx1, gy1 = loc_r - local_w // 2, loc_c - local_h // 2
+            gx2, gy2 = gx1 + local_w, gy1 + local_h
+            if gx1 < 0:
+                gx1, gx2 = 0, local_w
+            if gx2 > full_w:
+                gx1, gx2 = full_w - local_w, full_w
+
+            if gy1 < 0:
+                gy1, gy2 = 0, local_h
+            if gy2 > full_h:
+                gy1, gy2 = full_h - local_h, full_h
+        else:
+            gx1, gx2, gy1, gy2 = 0, full_w, 0, full_h
+
+        return [gx1, gx2, gy1, gy2]
+
+
+    def build_mapper(self):
+        params = {}
+        params['frame_width'] = self.env_frame_width
+        params['frame_height'] = self.env_frame_height
+        params['fov'] =  self.hfov
+        params['resolution'] = self.map_resolution
+        params['map_size_cm'] = self.map_size_cm
+        params['agent_min_z'] = self.agent_min_z
+        params['agent_max_z'] = self.agent_max_z
+        params['agent_height'] = self.camera_height * 100
+        params['agent_view_angle'] = self.agent_view_angle
+        params['du_scale'] = self.du_scale
+        params['vision_range'] = self.vision_range
+        params['object_len'] = self.object_len
+        params['obs_threshold'] = self.obs_threshold
+        self.selem = skimage.morphology.disk(5 /
+                                             5)
+        mapper = MapBuilder(params)
+        return mapper
+
 
 
     def get_sim_location(self):
@@ -525,25 +547,20 @@ class NavSLAMRLEnv(NavRLEnv):
         last_start = pu.threshold_poses(last_start, self.visited_gt.shape)
 
         # Get ground truth pose
-        start_x_gt, start_y_gt, start_o_gt = self.curr_loc_gt
+        start_x_gt, start_y_gt, start_o_gt = self.curr_loc_pose
         r, c = start_y_gt, start_x_gt
         start_gt = [int(r * 100.0/self.map_resolution),
                     int(c * 100.0/self.map_resolution)]
         start_gt = pu.threshold_poses(start_gt, self.visited_gt.shape)
         
-        planning_window = [0, 480, 0, 480]
-
-        # global_goal=kwargs["goal"]
-        # print("global_goals type: ", type(global_goal))
-        # print("global_goals type: ", global_goal)
+        planning_window = [0, 240, 0, 240]
 
         # semantic map goal
-        # goal_list=[]
         Find_flag = False
         object_map = self.semantic_map[:,:,self.object_ind[0]-1]
         if len(object_map[object_map!=0]) > 5:
-            print("map_objectid: ", self.object_ind[0],
-                "num: ", len(object_map[object_map!=0]))
+            # print("map_objectid: ", self.object_ind[0],
+            #     "num: ", len(object_map[object_map!=0]))
             goal_list = np.array(np.array(object_map.nonzero()).T)
             # print("goal_list: ", goal_list.shape)
 
@@ -556,7 +573,7 @@ class NavSLAMRLEnv(NavRLEnv):
             global_goal = torch.from_numpy(goal_list[index])
 
             Find_flag = True
-            print("global_goal: ", global_goal)
+            # print("global_goal: ", global_goal)
             
 
         goal = pu.threshold_poses(global_goal, self.map.shape)
@@ -578,28 +595,46 @@ class NavSLAMRLEnv(NavRLEnv):
                                         planning_window, start_o_gt, 
                                         Find_flag, replan)
         
+        # print("gt_action: ", gt_action)
         
-        dump_dir = "habitat_baselines/dump"
-        ep_dir = '{}/episodes/{}/{}/'.format(
-                            dump_dir, self.rank+1, self.episode_no)
-        if not os.path.exists(ep_dir):
-            os.makedirs(ep_dir)
-        vis_grid = vu.get_colored_map(self.map,
-                        self.collison_map,
-                        self.visited_gt,
-                        self.visited_gt,
-                        goal.int(),
-                        self.explored_map,
-                        self.explorable_map,
-                        self.map*self.explored_map,
-                        self.semantic_map)
-        vis_grid = np.flipud(vis_grid)
-        vu.visualize(self.figure, self.ax, self.obs, self.semantic, vis_grid[:,:,::-1],
-                    (start_x_gt, start_y_gt, start_o_gt),
-                    (start_x_gt, start_y_gt, start_o_gt),
-                    dump_dir, self.rank, self.episode_no,
-                    self.timestep, self.visualize,
-                    self.print_images, self.object_name, gt_action)
+        # dump_dir = "habitat_baselines/dump"
+        # ep_dir = '{}/episodes/{}/{}/'.format(
+        #                     dump_dir, self.rank+1, self.episode_no)
+        # if not os.path.exists(ep_dir):
+        #     os.makedirs(ep_dir)
+        # vis_grid = vu.get_colored_map(self.map,
+        #                 self.collison_map,
+        #                 self.visited_gt,
+        #                 goal.int(),
+        #                 self.explored_map,
+        #                 self.explorable_map,
+        #                 self.map*self.explored_map,
+        #                 self.semantic_map)
+        # vis_grid = np.flipud(vis_grid)
+
+        # full_map = self.full_map[:,:,1]
+        # full_map[full_map >= 0.5] = 1.0
+        # full_map[full_map < 0.5] = 0.
+        # self.explored_full_map = self.full_map.sum(2)
+        # self.explored_full_map[self.explored_full_map>1]=1.0
+        # self.full_semantic_map[self.full_semantic_map >= 0.5] = 1.0
+        # self.full_semantic_map[self.full_semantic_map < 0.5] = 0.0
+        # vis_full_grid = vu.get_colored_map(full_map,
+        #                 self.collison_full_map,
+        #                 self.visited_full,
+        #                 goal.int(),
+        #                 self.explored_full_map,
+        #                 self.explorable_map,
+        #                 full_map*self.explored_full_map,
+        #                 self.full_semantic_map)
+        # vis_full_grid = np.flipud(vis_full_grid)
+
+        # vu.visualize(self.figure, self.ax, self.obs, vis_grid[:,:,::-1],
+        #             (start_x_gt, start_y_gt, start_o_gt),
+        #             (start_x_gt, start_y_gt, start_o_gt),
+        #             dump_dir, self.rank, self.episode_no,
+        #             self.timestep, self.visualize,
+        #             self.print_images, self.object_name, gt_action)
 
         return gt_action
 
@@ -647,7 +682,7 @@ class NavSLAMRLEnv(NavRLEnv):
                         grid[x1:x2, y1:y2],
                         self.selem) != True
         traversible[self.collison_map[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 0
-        traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
+        traversible[self.visited_gt[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
 
         traversible[int(start[0]-x1)-1:int(start[0]-x1)+2,
                     int(start[1]-y1)-1:int(start[1]-y1)+2] = 1
@@ -707,7 +742,7 @@ class NavSLAMRLEnv(NavRLEnv):
                             grid[gx1:gx2, gy1:gy2][x1:x2, y1:y2],
                             self.selem) != True
             # print(grid[gx1:gx2, gy1:gy2].shape, grid[gx1:gx2, gy1:gy2][x1:x2, y1:y2].shape)
-            traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
+            traversible[self.visited_gt[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
             traversible[int(start[0]-x1)-1:int(start[0]-x1)+2,
                         int(start[1]-y1)-1:int(start[1]-y1)+2] = 1
             # print("traversible: ", traversible.shape)
@@ -747,9 +782,9 @@ class NavSLAMRLEnv(NavRLEnv):
 
         g_dist = pu.get_l2_distance(g_goal[0], start[0], g_goal[1], start[1])
 
-        if Find_flag:
-            print("distance: ", g_dist)
-        if (g_dist < 6.0 and Find_flag) or replan:
+        # if Find_flag:
+            # print("distance: ", g_dist)
+        if (g_dist < 4.0 and Find_flag) or replan:
             gt_action = 0
 
         elif relative_angle > 15.:

@@ -8,6 +8,7 @@ from habitat_baselines.common.base_trainer import BaseRLTrainer, BaseTrainer
 from habitat_baselines.rl.ddppo import DDPPOTrainer
 from habitat_baselines.rl.ddppo_semantic import DDPPOSETrainer
 from habitat_baselines.rl.ddppo_slam import DDPPOSLAMTrainer
+from habitat_baselines.rl.graph_ddppo_slam import GRAPHDDPPOSLAMTrainer
 from habitat_baselines.rl.ppo.ppo_trainer import PPOTrainer, RolloutStorage
 
 __all__ = ["BaseTrainer", "BaseRLTrainer", "PPOTrainer", "RolloutStorage"]

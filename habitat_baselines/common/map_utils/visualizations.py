@@ -14,7 +14,7 @@ import skimage
 from PIL import Image
 from habitat_sim.utils.common import d3_40_colors_rgb
 
-def visualize(fig, ax, img, semantic_obs, grid, pos, gt_pos, dump_dir, rank, ep_no, t,
+def visualize(fig, ax, img, grid, pos, gt_pos, dump_dir, rank, ep_no, t,
               visualize, print_images, object_name, gt_action):
     for i in range(2):
         ax[i].clear()
@@ -36,12 +36,12 @@ def visualize(fig, ax, img, semantic_obs, grid, pos, gt_pos, dump_dir, rank, ep_
                     fontname='Helvetica',
                     fontsize=20)
 
-    semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
-    semantic_img.putpalette(d3_40_colors_rgb.flatten())
-    semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
-    semantic_img = semantic_img.convert("RGB")
-    semantic_img = np.array(semantic_img)
-    ax[2].imshow(semantic_img)
+    # semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
+    # semantic_img.putpalette(d3_40_colors_rgb.flatten())
+    # semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
+    # semantic_img = semantic_img.convert("RGB")
+    # semantic_img = np.array(semantic_img)
+    # ax[2].imshow(semantic_obs)
     # print("================================vis: ", img.shape, "================================", grid.shape) #480 480 3
     # Draw GT agent pose
     agent_size = 8
@@ -98,7 +98,7 @@ def fill_color(colored, mat, color):
     return colored
 
 
-def get_colored_map(mat, collision_map, visited, visited_gt, goal,
+def get_colored_map(mat, collision_map, visited_gt, goal,
                     explored, gt_map, gt_map_explored, semantic_map):
     m, n = mat.shape
     colored = np.zeros((m, n, 3))
@@ -122,8 +122,6 @@ def get_colored_map(mat, collision_map, visited, visited_gt, goal,
     red_palette = sns.light_palette("red")
 
     colored = fill_color(colored, visited_gt, current_palette[0])
-    colored = fill_color(colored, visited, pal[4])
-    colored = fill_color(colored, visited * visited_gt, pal[5])
 
     # colored = fill_color(colored, collision_map, pal[2])
 

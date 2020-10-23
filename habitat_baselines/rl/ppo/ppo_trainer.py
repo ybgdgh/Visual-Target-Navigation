@@ -194,8 +194,8 @@ class PPOTrainer(BaseRLTrainer):
         env_time += time.time() - t_step_env
 
         t_update_stats = time.time()
-        for i in range(len(observations)):
-            observations[i]["semantic"] = observations[i]["semantic"].astype(np.int32)
+        # for i in range(len(observations)):
+        #     observations[i]["semantic"] = observations[i]["semantic"].astype(np.int32)
         batch = batch_obs(observations, device=self.device)
         rewards = torch.tensor(
             rewards, dtype=torch.float, device=current_episode_reward.device

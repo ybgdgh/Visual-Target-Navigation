@@ -155,7 +155,7 @@ class RolloutStorage:
 
             for offset in range(num_envs_per_batch):
                 ind = perm[start_ind + offset]
-                print("ind: ", ind)
+                # print("ind: ", ind)
                 for sensor in self.observations:
                     observations_batch[sensor].append(
                         self.observations[sensor][: self.step, ind]
@@ -164,7 +164,7 @@ class RolloutStorage:
                 recurrent_hidden_states_batch.append(
                     self.recurrent_hidden_states[0, :, ind]
                 )
-                print("action: ", self.actions[: self.step, ind].shape) # 64*1
+                # print("action: ", self.actions[: self.step, ind].shape) # 64*1
                 actions_batch.append(self.actions[: self.step, ind])
                 prev_actions_batch.append(self.prev_actions[: self.step, ind])
                 value_preds_batch.append(self.value_preds[: self.step, ind])

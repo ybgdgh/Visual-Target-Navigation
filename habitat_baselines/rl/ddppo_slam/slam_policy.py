@@ -73,13 +73,11 @@ class ObjectNavSLAMPolicy(nn.Module):
         #             "num: ", len(object_map[object_map!=0]))
         #         # print("action: ", torch.nonzero(object_map).sum(0))
         #         action[index] = (torch.nonzero(object_map).sum(0)).float() / (len(object_map[object_map!=0]) * 480.0)
-                # print("action: ", action[index])
-                
-
-
-
+        # print("action: ", action)
 
         action_log_probs = distribution.log_probs(action)
+
+        # print("action_log_probs: ", action_log_probs)
 
         return value, action, action_log_probs
 
@@ -96,10 +94,15 @@ class ObjectNavSLAMPolicy(nn.Module):
         features = self.net(
             observations, prev_actions, masks
         )
+
+        # print("features: ", torch.max(features))
+
         distribution = self.global_action_distribution(features)
         value = self.critic(features)
-        # print("actions: ", action.shape)
+        # print("evaluate_actions: ", action)
         action_log_probs = distribution.log_probs(action)
+        # print("evaluate_actions_log_probs: ", action_log_probs)
+
         distribution_entropy = distribution.entropy().mean()
 
         return value, action_log_probs, distribution_entropy
@@ -140,10 +143,11 @@ class MapEncoder(nn.Module):
         self.conv4 = nn.Conv2d(128, 64, 3, stride=1, padding=1)
         self.conv5 = nn.Conv2d(64, 32, 3, stride=1, padding=1)
         self.fc = nn.Linear(7200, out_channels)
+        # self.fc = nn.Linear(1568, out_channels)
         
     def forward(self, x):
         # print("x: ", x.shape) # 1 23 480 480
-        x = self.maxpool(x) # 1 23 240 240
+        # x = self.maxpool(x) # 1 23 240 240
         x = self.conv1(x)
         x = nn.ReLU()(x)
         # print("x: ", x.shape) # 1 32 240 240
@@ -167,8 +171,9 @@ class MapEncoder(nn.Module):
         x = self.conv5(x)
         x = nn.ReLU()(x)
         # print("x: ", x.shape) # 1 32 15 15
+        # print("x: ", x.shape) # 1 32 7 7
 
-        x = Flatten()(x)
+        x = Flatten()(x.contiguous())
 
         # print("x: ", x.shape) # 1*7200
 
@@ -196,18 +201,18 @@ class ObjectNavSLAMNet(Net):
                 int(
                     observation_space.spaces[ObjectGoalSensor.cls_uuid].high[0]
                 )
-                + 1
+                + 2
             )
             self.obj_categories_embedding = nn.Embedding(
-                self._n_object_categories, 32
+                self._n_object_categories, 256
             )
-            hidden_size = 32
+            hidden_size = 256
 
         # current pose embedding
         curr_pose_dim = observation_space.spaces["curr_pose"].shape[0]
         # print("curr_pose_dim: ", curr_pose_dim)
-        self.curr_pose_embedding = nn.Linear(curr_pose_dim, 32)
-        hidden_size += 32
+        self.curr_pose_embedding = nn.Linear(curr_pose_dim, 256)
+        hidden_size += 256
 
         map_dim = observation_space.spaces["map_sum"].shape[2]
         self.map_encoder = MapEncoder(
@@ -233,23 +238,28 @@ class ObjectNavSLAMNet(Net):
 
         # permute tensor to dimension [BATCH x CHANNEL x HEIGHT X WIDTH]
         map_sum = map_sum.permute(0, 3, 1, 2)
-        # print("map_sum shape: ", map_sum.shape) # 1*480*480*3
-        # /print("self.map_embedding(map_sum) shape: ", self.map_encoder(map_sum).shape) # 1*480*480*3
+        # print("map_sum shape: ", map_sum) # 1*480*480*3
+        # print("self.map_embedding(map_sum) shape: ", self.map_encoder(map_sum)) # 1*480*480*3
 
-        x.append(self.map_encoder(map_sum))
+        map_aa = self.map_encoder(map_sum)
+        # print("self.map_encoder(map_sum): ", torch.max(map_aa))
+
+        x.append(map_aa)
         
         if ObjectGoalSensor.cls_uuid in observations:
             object_goal = observations[ObjectGoalSensor.cls_uuid].long()
-            # print("***************object_goal: ", self.obj_categories_embedding(object_goal).squeeze(dim=1))
-            x.append(self.obj_categories_embedding(object_goal).squeeze(dim=1))
+            # print("object_goal: ", object_goal)
+            goal_aa = self.obj_categories_embedding(object_goal).squeeze(dim=1)
+            # print("***************object_goal: ", goal_aa)
+            x.append(goal_aa)
 
         # current pose embedding
         curr_pose = observations["curr_pose"]
         curr_pose = curr_pose/map_sum.shape[2]
         # print("curr_pose: ", curr_pose)
         curr_pose_obs = self.curr_pose_embedding(curr_pose)
-        # print("curr_pose shape: ", curr_pose.shape) # 1*2
-        # print("curr_pose: ", curr_pose) # 1*2
+        # print("curr_pose shape: ", curr_pose_obs) # 1*2
+        # print("curr_pose: ", torch.max(curr_pose_obs)) # 1*2
         # print("curr_pose_obs shape: ", curr_pose_obs.shape) # 1*32
         
         x.append(curr_pose_obs)

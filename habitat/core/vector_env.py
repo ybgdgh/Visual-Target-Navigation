@@ -52,6 +52,7 @@ COUNT_EPISODES_COMMAND = "count_episodes"
 EPISODE_OVER = "episode_over"
 GET_METRICS = "get_metrics"
 GET_LOCAL_ACTIONS = "get_local_actions"
+UPDATE_FULL_MAP = "update_full_map"
 
 
 def _make_env_fn(
@@ -233,6 +234,10 @@ class VectorEnv:
                     result = env.get_metrics()
                     connection_write_fn(result)
 
+                elif command == UPDATE_FULL_MAP:
+                    result = env.update_full_map()
+                    connection_write_fn(result)
+
                 else:
                     raise NotImplementedError
 
@@ -339,6 +344,16 @@ class VectorEnv:
             results.append(read_fn())
         self._is_waiting = False
         return results
+
+    def update_full_map(self):
+        self._is_waiting = True
+        for write_fn in self._connection_write_fns:
+            write_fn((UPDATE_FULL_MAP, None))
+        results = []
+        for read_fn in self._connection_read_fns:
+            results.append(read_fn())
+        self._is_waiting = False
+        return 0
 
     def reset(self):
         r"""Reset all the vectorized environments

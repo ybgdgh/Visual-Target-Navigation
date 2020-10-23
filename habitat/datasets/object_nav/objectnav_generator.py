@@ -11,10 +11,10 @@ import numpy as np
 import re
 import math
 
-from habitat.core.simulator import Simulator
+from habitat.core.simulator import Simulator, AgentState
 from habitat.datasets.utils import get_action_shortest_path
 from habitat.tasks.nav.nav import NavigationEpisode, NavigationGoal
-from habitat.tasks.nav.object_nav_task import ObjectGoalNavEpisode, ObjectGoal
+from habitat.tasks.nav.object_nav_task import ObjectGoalNavEpisode, ObjectGoal, ObjectViewLocation
 from habitat_sim.errors import GreedyFollowerError
 
 r"""A minimum radius of a plane that a point should be part of to be
@@ -118,7 +118,7 @@ def generate_objectnav_episode(
     closest_dist_limit: float = 1,
     furthest_dist_limit: float = 10,
     geodesic_to_euclid_min_ratio: float = 1.1,
-    number_retries_per_target: int = 1000,
+    number_retries_per_target: int = 100,
 ) -> ObjectGoalNavEpisode:
     r"""Generator function that generates PointGoal navigation episodes.
 
@@ -166,7 +166,7 @@ def generate_objectnav_episode(
                 else:
                     target[obj.category.index()] = [obj]
     # print("target len:", len(target))
-    for i in target:      
+    for i in target:    
         episode_count = 0
         while episode_count < num_episodes or num_episodes < 0:
             # print("target episode len:", len(target[i]))
@@ -179,6 +179,7 @@ def generate_objectnav_episode(
                 target_position.append(target[i][j].aabb.center.tolist())
                 target_id.append(target[i][j].id)
 
+            shortest_paths = None
             for retry in range(number_retries_per_target):
                 source_position = sim.sample_navigable_point()
                 # source_position[1] = High
@@ -197,28 +198,48 @@ def generate_objectnav_episode(
                     # print("source: ", source_position)
                     # print("target_position: ", target_position)
                     # print("warning: ", sim.geodesic_distance(source_position, target_position))
-                    break
-            # print("episode_count: ", episode_count)
-            if is_compatible and sim.geodesic_distance(source_position, target_position) != np.inf:
-                angle = np.random.uniform(0, 2 * np.pi)
-                source_rotation = [0, np.sin(angle / 2), 0, np.cos(angle / 2)]
+                    angle = np.random.uniform(0, 2 * np.pi)
+                    source_rotation = [0, np.sin(angle / 2), 0, np.cos(angle / 2)]
+                    if is_gen_shortest_path:
+                        try:
+                            shortest_paths = [
+                                get_action_shortest_path(
+                                    sim,
+                                    source_position=source_position,
+                                    source_rotation=source_rotation,
+                                    goal_position=target_position_episode,
+                                    success_distance=shortest_path_success_distance,
+                                    max_episode_steps=shortest_path_max_steps,
+                                )
+                            ]
+                        # Throws an error when it can't find a path
+                        except GreedyFollowerError:
+                            continue
 
-                shortest_paths = None
-                if is_gen_shortest_path:
-                    try:
-                        shortest_paths = [
-                            get_action_shortest_path(
-                                sim,
-                                source_position=source_position,
-                                source_rotation=source_rotation,
-                                goal_position=target_position_episode,
-                                success_distance=shortest_path_success_distance,
-                                max_episode_steps=shortest_path_max_steps,
-                            )
-                        ]
-                    # Throws an error when it can't find a path
-                    except GreedyFollowerError:
-                        continue
+                    if len(shortest_paths) < shortest_path_max_steps-1:
+                        # print("Found! ", object_category)
+                        break
+            # print("episode_count: ", episode_count)
+            if is_compatible and sim.geodesic_distance(source_position, target_position) != np.inf and len(shortest_paths) < shortest_path_max_steps-1:
+                # angle = np.random.uniform(0, 2 * np.pi)
+                # source_rotation = [0, np.sin(angle / 2), 0, np.cos(angle / 2)]
+
+                # shortest_paths = None
+                # if is_gen_shortest_path:
+                #     try:
+                #         shortest_paths = [
+                #             get_action_shortest_path(
+                #                 sim,
+                #                 source_position=source_position,
+                #                 source_rotation=source_rotation,
+                #                 goal_position=target_position_episode,
+                #                 success_distance=shortest_path_success_distance,
+                #                 max_episode_steps=shortest_path_max_steps,
+                #             )
+                #         ]
+                #     # Throws an error when it can't find a path
+                #     except GreedyFollowerError:
+                #         continue
 
                 episode = _create_episode(
                     episode_id=episode_count,
@@ -241,6 +262,8 @@ def generate_objectnav_episode(
 
             else:
                 break
+
+        # break
 
 
 def generate_objectnav_goals_by_category(
@@ -271,13 +294,36 @@ def generate_objectnav_goals_by_category(
 
         goals_by = []
         for j in range(len(target[i])):
+
+            object_view_list = []
+            for x in np.arange(target[i][j].aabb.center[0]
+                - target[i][j].aabb.sizes[0]/2.0, 
+                target[i][j].aabb.center[0]
+                + target[i][j].aabb.sizes[0]/2.0,
+                0.1):
+                for y in np.arange(target[i][j].aabb.center[2] 
+                    - target[i][j].aabb.sizes[2]/2.0, 
+                    target[i][j].aabb.center[2] 
+                    + target[i][j].aabb.sizes[2]/2.0,
+                    0.1):
+                    # print("x, y: ", type(x)) # np.float6
+                    # print("x, y: ", type(target[i][j].aabb.center[1])) # np.floa32 报错
+                    object_view_list.append(
+                        ObjectViewLocation(
+                            agent_state = AgentState(
+                                position = [x, target[i][j].aabb.center[1].astype(np.float64), y]
+                            ),
+                            iou = 0.0,
+                        )
+                    )
+            # print(type(object_view_list))
             goal_by_object = ObjectGoal(
                 position = target[i][j].aabb.center,
                 radius = 0.5,
                 object_id = int(re.findall(r"\d+",target[i][j].id)[0]),
                 object_name = target[i][j].id,
                 object_category = object_category,
-                view_points = [],
+                view_points = object_view_list,
             )
         
             goals_by.append(goal_by_object)       

@@ -44,16 +44,19 @@ class CustomFixedCategorical(torch.distributions.Categorical):
 
 class FixedNormal(torch.distributions.Normal):
     def log_probs(self, actions):
+      
         return(
             super()
-            .log_prob(actions)
+            .log_prob(actions+1e-10)
             .sum(-1, keepdim=False)
             .unsqueeze(-1)
         )
+
     def mode(self):
         return self.mean
         
     def sample(self, sample_shape=torch.Size()):
+        # print("super().sample(sample_shape): ", super().sample(sample_shape))
         return torch.sigmoid(super().sample(sample_shape))
 
 class CategoricalNet(nn.Module):
@@ -85,9 +88,12 @@ class DiagGaussian(nn.Module):
 
         zeros = torch.zeros(action_mean.size())
         if x.is_cuda:
-            zeros = zeros.cuda()
+            zeros = zeros.to(x.device)
 
+        # print("zeros: ", zeros)
         action_logstd = self.logstd(zeros)
+        # print("action_logstd: ", action_logstd)
+        # print("action_logstd.exp(): ", action_logstd.exp())
         return FixedNormal(action_mean, action_logstd.exp())
 
 class AddBias(nn.Module):
@@ -95,11 +101,13 @@ class AddBias(nn.Module):
         super(AddBias, self).__init__()
         self._bias = nn.Parameter(bias.unsqueeze(1))
 
+
     def forward(self, x):
         if x.dim() == 2:
             bias = self._bias.t().view(1, -1)
         else:
             bias = self._bias.t().view(1, -1, 1, 1)
+        # print("bias: ", bias)
 
         return x + bias
 

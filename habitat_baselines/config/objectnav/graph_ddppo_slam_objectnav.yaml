@@ -1,18 +1,18 @@
 BASE_TASK_CONFIG_PATH: "habitat_baselines/config/objectnav/objectnav_gibson.yaml"
 CMD_TRAILING_OPTS: ["TASK_CONFIG.ENVIRONMENT.ITERATOR_OPTIONS.MAX_SCENE_REPEAT_STEPS", "50000"]
-TRAINER_NAME: "ddppo_semantic"
-ENV_NAME: "NavRLEnv"
+TRAINER_NAME: "graph_ddppo_slam"
+ENV_NAME: "NavSLAMRLEnv"
 SIMULATOR_GPU_ID: 0
 TORCH_GPU_ID: 0
 VIDEO_OPTION: []
 TENSORBOARD_DIR: "tb"
 VIDEO_DIR: "video_dir"
 TEST_EPISODE_COUNT: -1
-EVAL_CKPT_PATH_DIR: "data/ddppo-models/ddppo_objectnav_habitat2020_challenge_baseline_v1.pth"
-NUM_PROCESSES: 8
+EVAL_CKPT_PATH_DIR: "data/ddppo-models/ckpt.25.pth"
+NUM_PROCESSES: 7
 SENSORS: ["DEPTH_SENSOR", "RGB_SENSOR", "SEMANTIC_SENSOR"]
-CHECKPOINT_FOLDER: "data/new_checkpoints_se"
-NUM_UPDATES: 40000
+CHECKPOINT_FOLDER: "data/new_checkpoints_graph_slam"
+NUM_UPDATES: 20000
 LOG_INTERVAL: 10
 CHECKPOINT_INTERVAL: 100
 EVAL:
@@ -25,7 +25,7 @@ RL:
     # ppo params
     clip_param: 0.2
     ppo_epoch: 4
-    num_mini_batch: 2
+    num_mini_batch: 1
     value_loss_coef: 0.5
     entropy_coef: 0.01
     lr: 2.5e-4
@@ -65,3 +65,26 @@ RL:
 
   SEDDPPO:
     pretrained_visual: data/ddppo-models/resnet50-19c8e357.pth
+
+  SLAMDDPPO:
+    map_resolution: 5
+    map_size_cm: 1200
+    obstacle_boundary: 5
+    collision_threshold: 0.20
+    agent_min_z: 25
+    agent_max_z: 150
+    agent_view_angle: 0
+    du_scale: 2
+    vision_range: 64
+    visualize: 1
+    obs_threshold: 1
+    vis_type: 2
+
+    map_output_size: 512
+
+    num_each_global_step: 32
+
+    global_downscaling: 2
+
+
+    

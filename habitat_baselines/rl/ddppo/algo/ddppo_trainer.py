@@ -207,8 +207,8 @@ class DDPPOTrainer(PPOTrainer):
 
         observations = self.envs.reset()
         print("*************************** observations len:", len(observations))
-        for i in range(len(observations)):
-            observations[i]["semantic"] = observations[i]["semantic"].astype(np.int32)
+        # for i in range(len(observations)):
+        #     observations[i]["semantic"] = observations[i]["semantic"].astype(np.int32)
         # print("*************************** observations type:", observations)
         batch = batch_obs(observations, device=self.device)
         print("*************************** batch len:", len(batch))

@@ -113,6 +113,7 @@ _C.RL.SLAMDDPPO.visualize = 1
 _C.RL.SLAMDDPPO.obs_threshold = 1
 _C.RL.SLAMDDPPO.vis_type = 2
 _C.RL.SLAMDDPPO.map_output_size = 512
+_C.RL.SLAMDDPPO.global_downscaling = 2
 # -----------------------------------------------------------------------------
 # ORBSLAM2 BASELINE
 # -----------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from gym import spaces
 from gym.spaces.dict_space import Dict as SpaceDict
 from torch.optim.lr_scheduler import LambdaLR
 
+import tqdm
 import contextlib
 import os
 import random
@@ -19,13 +20,13 @@ import time
 from collections import OrderedDict, defaultdict, deque
 
 from habitat import Config, logger
+from habitat.utils.visualizations.utils import observations_to_image
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ddppo.algo.ddppo_trainer import DDPPOTrainer
 from habitat_baselines.common.env_utils import construct_envs
 from habitat_baselines.common.environments import get_env_class
 from habitat_baselines.common.global_rollout_storage import GlobalRolloutStorage
 from habitat_baselines.common.tensorboard_utils import TensorboardWriter
-from habitat_baselines.common.utils import batch_obs, linear_decay
 from habitat_baselines.rl.ddppo.algo.ddp_utils import (
     EXIT,
     REQUEUE,
@@ -35,7 +36,11 @@ from habitat_baselines.rl.ddppo.algo.ddp_utils import (
     requeue_job,
     save_interrupted_state,
 )
-
+from habitat_baselines.common.utils import (
+    batch_obs,
+    generate_video,
+    linear_decay,
+)
 
 from habitat_baselines.rl.ddppo_slam.slam_policy import ObjectNavSLAMPolicy
 from habitat_baselines.rl.ddppo_slam.ddppo_slam import DDPPOSLAM
@@ -50,6 +55,71 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
 
     def __init__(self, config=None):
         super().__init__(config)
+
+    def _setup_actor_critic_agent(self, observations, ppo_cfg: Config) -> None:
+        # Global policy observation space
+        self.obs_space = self.envs.observation_spaces[0]
+        # add the map observation space
+        self.obs_space = SpaceDict(
+            {
+                "map_sum": spaces.Box(
+                    low=0,
+                    high=1,
+                    shape=observations[0]["map_sum"].shape,
+                    dtype=np.uint8,
+                ),
+                "curr_pose": spaces.Box(
+                    low=0,
+                    high=1,
+                    shape=observations[0]["curr_pose"].shape,
+                    dtype=np.uint8,
+                ),
+                **self.obs_space.spaces,
+            }
+        )
+        print("*************************** self.obs_space:", self.obs_space) #self.obs_space: Dict(compass:Box(1,), depth:Box(256, 256, 1), gps:Box(2,), map_sum:Box(480, 480, 23), objectgoal:Box(1,), rgb:Box(256, 256, 3), semantic:Box(256, 256))
+
+
+        # Global policy action space
+        self.g_action_space = spaces.Box(low=0.0, high=1.0,
+                                    shape=(2,), dtype=np.float32)
+    
+        self.actor_critic = ObjectNavSLAMPolicy(
+            observation_space=self.obs_space,
+            g_action_space=self.g_action_space,
+            l_action_space=self.envs.action_spaces[0],
+            pretrain_path = None,
+            output_size = self.config.RL.SLAMDDPPO.map_output_size,
+        )
+        self.actor_critic.to(self.device)
+
+        print("*************************** action_space", self.envs.action_spaces[0].n)
+        # print("*************************** action_space n", self.envs.action_spaces)
+
+
+        if self.config.RL.DDPPO.reset_critic:
+            nn.init.orthogonal_(self.actor_critic.critic.fc.weight)
+            nn.init.constant_(self.actor_critic.critic.fc.bias, 0)
+
+        self.agent = DDPPOSLAM(
+            actor_critic=self.actor_critic,
+            clip_param=ppo_cfg.clip_param,
+            ppo_epoch=ppo_cfg.ppo_epoch,
+            num_mini_batch=ppo_cfg.num_mini_batch,
+            value_loss_coef=ppo_cfg.value_loss_coef,
+            entropy_coef=ppo_cfg.entropy_coef,
+            lr=ppo_cfg.lr,
+            eps=ppo_cfg.eps,
+            max_grad_norm=ppo_cfg.max_grad_norm,
+            use_normalized_advantage=ppo_cfg.use_normalized_advantage,
+        )
+  
+        print("*************************** num_steps:", ppo_cfg.num_steps)
+        print("*************************** num_envs:", self.envs.num_envs)
+        print("*************************** self.obs_space:", self.obs_space.spaces)
+        print("*************************** action_spaces:", self.envs.action_spaces[0])
+        print("*************************** hidden_size:", ppo_cfg.hidden_size)
+
 
     
     def _collect_global_rollout_step(
@@ -78,17 +148,21 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
                     rollouts.masks[rollouts.step],
                     # deterministic=True,
                 )
+            
+            self.envs.update_full_map()
 
             self.global_goals = torch.Tensor(
                         [[(action[0] * self.map_w), 
                         (action[1] * self.map_h)]
                         for action in self.actions])
-            # print("global_goals: ", self.global_goals)
+        # print("global_goals: ", self.global_goals)
             # print("self.actions: ", self.actions)
             # print("actions_log_probs: ", self.actions_log_probs)
 
         # sample action
         l_actions = self.envs.get_local_actions(self.global_goals)
+
+        # print("action: ", l_actions)
 
         pth_time += time.time() - t_sample_action
 
@@ -98,12 +172,12 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
 
         observations, rewards, dones, infos = [list(x) for x in zip(*outputs)]
 
-        print("step:", rollouts.step,
-            "l_actions:", l_actions[0], 
-            "global_goals:", self.global_goals[0],
-            "pose:", observations[0]["curr_pose"], 
-            "object:", observations[0]["objectgoal"],
-            "dones:", dones[0])
+        # print("step:", rollouts.step,
+        #     "l_actions:", l_actions[0], 
+        #     "global_goals:", self.global_goals[0],
+        #     "pose:", observations[0]["curr_pose"], 
+        #     "object:", observations[0]["objectgoal"],
+        #     "dones:", dones[0])
 
         # print("dones: ", dones)
         env_time += time.time() - t_step_env
@@ -111,10 +185,15 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
         t_update_stats = time.time()
   
         batch = batch_obs(observations, device=self.device)
+
+        # assert (np.any(np.isnan(rewards)) == False), "Reward has nan."
+
         rewards = torch.tensor(
             rewards, dtype=torch.float, device=current_episode_reward.device
         )
         rewards = rewards.unsqueeze(1)
+
+        rewards = torch.where(torch.isnan(rewards), torch.full_like(rewards, 0), rewards)
 
         masks = torch.tensor(
             [[0.0] if done else [1.0] for done in dones],
@@ -137,7 +216,7 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
             running_episode_stats[k] += (1 - masks) * v
 
         current_episode_reward *= masks
-
+        
         rollouts.insert(
             batch,
             self.actions,
@@ -164,10 +243,12 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
                 rollouts.prev_g_actions[rollouts.step],
                 rollouts.masks[rollouts.step],
             ).detach()
-
+                    
         rollouts.compute_returns(
             next_value, ppo_cfg.use_gae, ppo_cfg.gamma, ppo_cfg.tau
         )
+
+        # print("next_value: ", next_value)
 
         value_loss, action_loss, dist_entropy = self.agent.update(rollouts)
 
@@ -193,7 +274,7 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
         self.local_rank, tcp_store = init_distrib_slurm(
             self.config.RL.DDPPO.distrib_backend
         )
-        self.local_rank = 1
+        # self.local_rank = 1
         add_signal_handlers()
 
         # Stores the number of workers that have finished their rollout
@@ -246,8 +327,8 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
             se = list(set(observations[i]["semantic"].ravel()))
             print(se)
         # print("*************************** observations type:", observations)
-        print("*************************** observations type:", observations[0]["map_sum"].shape) # 480*480*23
-        print("*************************** observations curr_pose:", observations[0]["curr_pose"]) # []
+        # print("*************************** observations type:", observations[0]["map_sum"].shape) # 480*480*23
+        # print("*************************** observations curr_pose:", observations[0]["curr_pose"]) # []
 
         batch = batch_obs(observations, device=self.device)
         print("*************************** batch len:", len(batch))
@@ -264,49 +345,6 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
         self.map_w = observations[0]["map_sum"].shape[0]
         self.map_h = observations[0]["map_sum"].shape[1]
         # print("map_: ", observations[0]["curr_pose"].shape)
-        # Global policy observation space
-        
-        obs_space = self.envs.observation_spaces[0]
-        # add the map observation space
-        obs_space = SpaceDict(
-            {
-                "map_sum": spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=observations[0]["map_sum"].shape,
-                    dtype=np.uint8,
-                ),
-                "curr_pose": spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=observations[0]["curr_pose"].shape,
-                    dtype=np.uint8,
-                ),
-                **obs_space.spaces,
-            }
-        )
-        print("*************************** obs_space:", obs_space) #obs_space: Dict(compass:Box(1,), depth:Box(256, 256, 1), gps:Box(2,), map_sum:Box(480, 480, 23), objectgoal:Box(1,), rgb:Box(256, 256, 3), semantic:Box(256, 256))
-
-
-        # Global policy action space
-        g_action_space = spaces.Box(low=0.0, high=1.0,
-                                    shape=(2,), dtype=np.float32)
-    
-        self.actor_critic = ObjectNavSLAMPolicy(
-            observation_space=obs_space,
-            g_action_space=g_action_space,
-            l_action_space=self.envs.action_spaces[0],
-            pretrain_path = None,
-            output_size = self.config.RL.SLAMDDPPO.map_output_size,
-        )
-        self.actor_critic.to(self.device)
-
-        print("*************************** action_space", self.envs.action_spaces[0].n)
-        # print("*************************** action_space n", self.envs.action_spaces)
-
-        if self.config.RL.DDPPO.reset_critic:
-            nn.init.orthogonal_(self.actor_critic.critic.fc.weight)
-            nn.init.constant_(self.actor_critic.critic.fc.bias, 0)
 
 
         ppo_cfg = self.config.RL.PPO
@@ -316,25 +354,7 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
         ):
             os.makedirs(self.config.CHECKPOINT_FOLDER)
 
-        self.agent = DDPPOSLAM(
-            actor_critic=self.actor_critic,
-            clip_param=ppo_cfg.clip_param,
-            ppo_epoch=ppo_cfg.ppo_epoch,
-            num_mini_batch=ppo_cfg.num_mini_batch,
-            value_loss_coef=ppo_cfg.value_loss_coef,
-            entropy_coef=ppo_cfg.entropy_coef,
-            lr=ppo_cfg.lr,
-            eps=ppo_cfg.eps,
-            max_grad_norm=ppo_cfg.max_grad_norm,
-            use_normalized_advantage=ppo_cfg.use_normalized_advantage,
-        )
-  
-        print("*************************** num_steps:", ppo_cfg.num_steps)
-        print("*************************** num_envs:", self.envs.num_envs)
-        print("*************************** obs_space:", obs_space.spaces)
-        print("*************************** action_spaces:", self.envs.action_spaces[0])
-        print("*************************** hidden_size:", ppo_cfg.hidden_size)
-
+        self._setup_actor_critic_agent(observations, ppo_cfg)
 
         self.agent.init_distributed(find_unused_params=True)
 
@@ -359,8 +379,8 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
         rollouts = GlobalRolloutStorage(
             ppo_cfg.num_steps,
             self.envs.num_envs,
-            obs_space,
-            g_action_space,
+            self.obs_space,
+            self.g_action_space,
         )
         rollouts.to(self.device)
 
@@ -633,3 +653,251 @@ class DDPPOSLAMTrainer(DDPPOTrainer):
                         count_checkpoints += 1
 
             self.envs.close()
+
+
+
+    def _eval_checkpoint(
+        self,
+        checkpoint_path: str,
+        writer: TensorboardWriter,
+        checkpoint_index: int = 0,
+    ) -> None:
+        r"""Evaluates a single checkpoint.
+
+        Args:
+            checkpoint_path: path of checkpoint
+            writer: tensorboard writer object for logging to tensorboard
+            checkpoint_index: index of cur checkpoint for logging
+
+        Returns:
+            None
+        """
+        # Map location CPU is almost always better than mapping to a CUDA device.
+        ckpt_dict = self.load_checkpoint(checkpoint_path, map_location="cpu")
+
+        print("Checkpoint: {}".format(ckpt_dict))
+
+        if self.config.EVAL.USE_CKPT_CONFIG:
+            config = self._setup_eval_config(ckpt_dict["config"])
+        else:
+            config = self.config.clone()
+
+        ppo_cfg = config.RL.PPO
+
+        config.defrost()
+        config.TASK_CONFIG.DATASET.SPLIT = config.EVAL.SPLIT
+        config.freeze()
+
+        if len(self.config.VIDEO_OPTION) > 0:
+            config.defrost()
+            config.TASK_CONFIG.TASK.MEASUREMENTS.append("TOP_DOWN_MAP")
+            config.TASK_CONFIG.TASK.MEASUREMENTS.append("COLLISIONS")
+            config.freeze()
+
+        logger.info(f"env config: {config}")
+        self.envs = construct_envs(config, get_env_class(config.ENV_NAME))
+
+        observations = self.envs.reset()
+        batch = batch_obs(observations, device=self.device)
+
+        self.map_w = observations[0]["map_sum"].shape[0]
+        self.map_h = observations[0]["map_sum"].shape[1]
+
+        self._setup_actor_critic_agent(observations, ppo_cfg)
+
+        self.agent.load_state_dict(ckpt_dict["state_dict"])
+        self.actor_critic = self.agent.actor_critic
+
+        current_episode_reward = torch.zeros(
+            self.envs.num_envs, 1, device=self.device
+        )
+
+        test_recurrent_hidden_states = torch.zeros(
+            512,
+            self.config.NUM_PROCESSES,
+            ppo_cfg.hidden_size,
+            device=self.device,
+        )
+        prev_actions = torch.zeros(
+            self.config.NUM_PROCESSES, 2, device=self.device, dtype=torch.long
+        )
+
+        global_goals = [[int(action[0].item() * self.map_w), 
+                            int(action[1].item() * self.map_h)]
+                            for action in prev_actions]
+
+        
+        not_done_masks = torch.zeros(
+            self.config.NUM_PROCESSES, 1, device=self.device
+        )
+        stats_episodes = dict()  # dict of dicts that stores stats per episode
+
+        rgb_frames = [
+            [] for _ in range(self.config.NUM_PROCESSES)
+        ]  # type: List[List[np.ndarray]]
+        if len(self.config.VIDEO_OPTION) > 0:
+            os.makedirs(self.config.VIDEO_DIR, exist_ok=True)
+
+        number_of_eval_episodes = self.config.TEST_EPISODE_COUNT
+        if number_of_eval_episodes == -1:
+            number_of_eval_episodes = sum(self.envs.number_of_episodes)
+        else:
+            total_num_eps = sum(self.envs.number_of_episodes)
+            if total_num_eps < number_of_eval_episodes:
+                logger.warn(
+                    f"Config specified {number_of_eval_episodes} eval episodes"
+                    ", dataset only has {total_num_eps}."
+                )
+                logger.warn(f"Evaluating with {total_num_eps} instead.")
+                number_of_eval_episodes = total_num_eps
+
+        pbar = tqdm.tqdm(total=number_of_eval_episodes)
+        self.actor_critic.eval()
+        self.step=0
+        self.num_each_global_step = self.config.RL.SLAMDDPPO.num_each_global_step
+        while (
+            len(stats_episodes) < number_of_eval_episodes
+            and self.envs.num_envs > 0
+        ):
+            current_episodes = self.envs.current_episodes()
+
+            if self.step % (self.num_each_global_step) == 0:
+                with torch.no_grad():
+                    (
+                        _,
+                        actions,
+                        _,
+                    ) = self.actor_critic.act(
+                        batch,
+                        prev_actions,
+                        not_done_masks,
+                        deterministic=False,
+                    )
+
+                    prev_actions.copy_(actions)
+                self.step=0
+                self.envs.update_full_map()
+
+                global_goals = torch.Tensor(
+                        [[(action[0] * self.map_w), 
+                        (action[1] * self.map_h)]
+                        for action in actions])
+
+            l_actions = self.envs.get_local_actions(global_goals)
+            self.step = self.step+1
+
+            outputs = self.envs.step(l_actions)
+            
+
+            observations, rewards, dones, infos = [
+                list(x) for x in zip(*outputs)
+            ]
+            batch = batch_obs(observations, device=self.device)
+
+            not_done_masks = torch.tensor(
+                [[0.0] if done else [1.0] for done in dones],
+                dtype=torch.float,
+                device=self.device,
+            )
+
+            rewards = torch.tensor(
+                rewards, dtype=torch.float, device=self.device
+            ).unsqueeze(1)
+            current_episode_reward += rewards
+            next_episodes = self.envs.current_episodes()
+            envs_to_pause = []
+            n_envs = self.envs.num_envs
+            for i in range(n_envs):
+                if (
+                    next_episodes[i].scene_id,
+                    next_episodes[i].episode_id,
+                ) in stats_episodes:
+                    envs_to_pause.append(i)
+
+                # episode ended
+                if not_done_masks[i].item() == 0:
+                    pbar.update()
+                    episode_stats = dict()
+                    episode_stats["reward"] = current_episode_reward[i].item()
+                    episode_stats.update(
+                        self._extract_scalars_from_info(infos[i])
+                    )
+                    print("episode_stats", episode_stats)
+                    current_episode_reward[i] = 0
+                    # use scene_id + episode_id as unique id for storing stats
+                    stats_episodes[
+                        (
+                            current_episodes[i].scene_id,
+                            current_episodes[i].episode_id,
+                        )
+                    ] = episode_stats
+                    
+                    if len(self.config.VIDEO_OPTION) > 0:
+                        generate_video(
+                            video_option=self.config.VIDEO_OPTION,
+                            video_dir=self.config.VIDEO_DIR,
+                            images=rgb_frames[i],
+                            episode_id=current_episodes[i].episode_id,
+                            object_category=current_episodes[i].object_category,
+                            checkpoint_idx=checkpoint_index,
+                            metrics=self._extract_scalars_from_info(infos[i]),
+                            tb_writer=writer,
+                        )
+
+                        rgb_frames[i] = []
+
+                # episode continues
+                elif len(self.config.VIDEO_OPTION) > 0:
+                    frame = observations_to_image(observations[i], infos[i])
+                    rgb_frames[i].append(frame)
+
+            (
+                self.envs,
+                test_recurrent_hidden_states,
+                not_done_masks,
+                current_episode_reward,
+                prev_actions,
+                batch,
+                rgb_frames,
+            ) = self._pause_envs(
+                envs_to_pause,
+                self.envs,
+                test_recurrent_hidden_states,
+                not_done_masks,
+                current_episode_reward,
+                prev_actions,
+                batch,
+                rgb_frames,
+            )
+
+        num_episodes = len(stats_episodes)
+        for k, v in stats_episodes.items():
+            print(k, ": ", v)
+        # print("stats_episodes: ", stats_episodes)
+        print("num_episodes: {}".format(num_episodes))
+        aggregated_stats = dict()
+        for stat_key in next(iter(stats_episodes.values())).keys():
+            aggregated_stats[stat_key] = (
+                sum([v[stat_key] for v in stats_episodes.values()])
+                / num_episodes
+            )
+            # print("sum: {}".format(sum([v[stat_key] for v in stats_episodes.values()])))
+
+        for k, v in aggregated_stats.items():
+            logger.info(f"Average episode {k}: {v:.4f}")
+
+        step_id = checkpoint_index
+        if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
+            step_id = ckpt_dict["extra_state"]["step"]
+
+        writer.add_scalars(
+            "eval_reward",
+            {"average reward": aggregated_stats["reward"]},
+            step_id,
+        )
+
+        metrics = {k: v for k, v in aggregated_stats.items() if k != "reward"}
+        if len(metrics) > 0:
+            writer.add_scalars("eval_metrics", metrics, step_id)
+
+        self.envs.close()

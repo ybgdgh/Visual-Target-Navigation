@@ -114,6 +114,10 @@ class GlobalRolloutStorage:
                     self.returns[step + 1] * gamma * self.masks[step + 1]
                     + self.rewards[step]
                 )
+        # print("self.value_preds: ", self.value_preds)
+        # print("self.rewards: ", self.rewards)
+        # print("self.masks: ", self.masks)
+        # print("self.returns:", self.returns)
 
     def recurrent_generator(self, advantages, num_mini_batch):
         num_processes = self.rewards.size(1)
