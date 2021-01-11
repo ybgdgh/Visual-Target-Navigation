@@ -1,7 +1,8 @@
 # Visual Target Navigation in Unexplored Indoor Environments using 3D Scene Priors
----
+
 
 Author: Bangguo Yu, Fengyu Zhou, Ke Chen, Zhiyong Yang
+
 Affiliation: Shandong University
 
 ---
